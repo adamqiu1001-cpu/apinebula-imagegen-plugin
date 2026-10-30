@@ -1,0 +1,38 @@
+# Local Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local credentials and provider configuration
+.env
+.env.*
+.config/
+apinebula-api-key
+apinebula-storage.json
+*.pem
+*.key
+
+# Generated tasks and images belong outside the distribution
+output/
+outputs/
+state.json
+download.part
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local editor and agent settings
+.vscode/
+.idea/
+CLAUDE.local.md
+.claude/settings.local.json
+build/
+dist/
+
+# Private upload recovery and per-chat selections
+resume.json
+resume.lock
+.apinebula/

@@ -1,0 +1,13 @@
+{
+  "name": "apinebula-imagegen",
+  "displayName": "APINebula ImageGen",
+  "version": "2.0.0",
+  "description": "Generate and edit images through APINebula with gpt-image-2.5 (async tasks) or nanobanana Gemini models such as gemini-3.1-flash-image. Follow-up edits reuse the last image in the chat.",
+  "author": {
+    "name": "adamqiu1001-cpu",
+    "url": "https://github.com/adamqiu1001-cpu"
+  },
+  "homepage": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
+  "repository": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
+  "keywords": ["image-generation", "image-editing", "apinebula", "gpt-image", "nanobanana", "gemini"]
+}

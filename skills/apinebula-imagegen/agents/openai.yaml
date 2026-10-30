@@ -1,0 +1,4 @@
+interface:
+  display_name: "APINebula 绘图"
+  short_description: "APINebula 生图改图：gpt-image-2.5 与 nanobanana (Gemini)，连续修改无需重复附图"
+  default_prompt: "使用 $apinebula-imagegen 生成或修改图片；用户点名 nanobanana/Gemini 时用 gemini-3.1-flash-image，点名 gpt image 时用 gpt-image-2.5；后续修改沿用本聊天上一张成功出图。"

@@ -1,0 +1,26 @@
+{
+  "name": "apinebula-imagegen",
+  "version": "2.0.0",
+  "description": "Generate and edit images through APINebula with gpt-image-2.5 (async tasks) or nanobanana Gemini models such as gemini-3.1-flash-image.",
+  "author": {
+    "name": "adamqiu1001-cpu",
+    "url": "https://github.com/adamqiu1001-cpu"
+  },
+  "homepage": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
+  "repository": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
+  "keywords": ["image-generation", "image-editing", "apinebula", "gpt-image", "nanobanana", "gemini"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "APINebula ImageGen",
+    "shortDescription": "APINebula 生图改图：gpt-image-2.5 与 nanobanana (Gemini)",
+    "longDescription": "通过 APINebula 生成和修改图片。gpt-image-2.5 走异步任务接口，nanobanana 分组的 gemini-3.1-flash-image 等模型走同步接口；连续修改沿用本聊天上一张成功出图，不用重复附图。Key 由使用者在本机终端隐藏输入。",
+    "developerName": "adamqiu1001-cpu",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
+    "defaultPrompt": [
+      "用 APINebula 的 nanobanana 画一张赛博朋克城市夜景，16:9。",
+      "用 gpt-image-2.5 画一张雨后森林的水彩画。"
+    ]
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "apinebula",
+  "owner": {
+    "name": "adamqiu1001-cpu",
+    "url": "https://github.com/adamqiu1001-cpu"
+  },
+  "metadata": {
+    "description": "APINebula image generation plugin for Claude Code"
+  },
+  "plugins": [
+    {
+      "name": "apinebula-imagegen",
+      "source": "./",
+      "description": "APINebula image generation and editing with gpt-image-2.5 or nanobanana (Gemini) models",
+      "category": "productivity"
+    }
+  ]
+}
