@@ -8,6 +8,7 @@
   },
   "homepage": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
   "repository": "https://github.com/adamqiu1001-cpu/apinebula-imagegen-plugin",
+  "license": "MIT",
   "keywords": ["image-generation", "image-editing", "apinebula", "gpt-image", "nanobanana", "gemini"],
   "skills": "./skills/",
   "interface": {
