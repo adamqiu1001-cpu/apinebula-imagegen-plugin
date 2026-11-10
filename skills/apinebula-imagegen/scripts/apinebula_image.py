@@ -31,10 +31,26 @@ IS_WINDOWS = os.name == "nt"
 # Each APINebula token belongs to one group; a gpt-image key cannot call
 # Gemini models and vice versa, so keys are stored per group.
 GROUPS = {
-    "gpt-image": {"env": "APINEBULA_API_KEY", "file": KEY_FILE, "default_model": "gpt-image-2.5"},
+    "gpt-image": {"env": "APINEBULA_API_KEY", "file": KEY_FILE, "default_alias": "gpt-image"},
     "nanobanana": {"env": "APINEBULA_NANOBANANA_API_KEY", "file": NANOBANANA_KEY_FILE,
-                   "default_model": "gemini-3.1-flash-image"},
+                   "default_alias": "nanobanana"},
 }
+
+# Model aliases resolve to the newest model of a family that the key can call
+# (GET /v1/models), so a provider upgrade such as gpt-image-2.5 -> 2.6 needs no
+# code change. A family is the model name with its version number replaced by
+# {v}; "fallback" is used only when the model list cannot be read.
+ALIASES = {
+    "gpt-image": {"group": "gpt-image", "family": "gpt-image-{v}", "fallback": "gpt-image-2.5"},
+    "nanobanana": {"group": "nanobanana", "family": "gemini-{v}-flash-image",
+                   "fallback": "gemini-3.1-flash-image"},
+    "nanobanana-pro": {"group": "nanobanana", "family": "gemini-{v}-pro-image",
+                       "fallback": "gemini-3-pro-image-preview"},
+}
+ALIAS_SYNONYMS = {"gpt": "gpt-image", "gemini": "nanobanana", "gemini-flash": "nanobanana",
+                  "nano-banana": "nanobanana", "gemini-pro": "nanobanana-pro",
+                  "nano-banana-pro": "nanobanana-pro"}
+PREVIEW_SUFFIX = re.compile(r"-(?:preview|exp|experimental|beta)(?:-[a-z0-9.]+)*$")
 ASPECT_RATIOS = ("1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4",
                  "8:1", "9:16", "16:9", "21:9")
 IMAGE_SIZES = ("1K", "2K", "4K")
@@ -96,20 +112,102 @@ def has_key(group):
     return bool(os.environ.get(spec["env"], "").strip()) or spec["file"].exists()
 
 
+def canonical_alias(name):
+    name = (name or "").strip().lower()
+    name = ALIAS_SYNONYMS.get(name, name)
+    return name if name in ALIASES else None
+
+
 def group_for(model):
     """Gemini models live in the nanobanana group; everything else uses async image tasks."""
+    alias = canonical_alias(model)
+    if alias:
+        return ALIASES[alias]["group"]
     return "nanobanana" if model.lower().startswith("gemini-") else "gpt-image"
 
 
-def resolve_model(model=None):
-    """Explicit model, then APINEBULA_DEFAULT_MODEL, then the only configured group."""
+def model_family(name):
+    """Split a model id into (family, version tuple, is_stable); None without a version number."""
+    n = name.lower()
+    stable = True
+    suffix = PREVIEW_SUFFIX.search(n)
+    if suffix:
+        stable = False
+        n = n[:suffix.start()]
+    found = re.search(r"\d+(?:\.\d+)*", n)
+    if not found:
+        return None
+    family = n[:found.start()] + "{v}" + n[found.end():]
+    return family, tuple(int(x) for x in found.group(0).split(".")), stable
+
+
+def newest_in_family(family, available):
+    """Highest version wins; a stable release is preferred over any preview."""
+    ranked = []
+    for model in available:
+        info = model_family(model)
+        if info and info[0] == family:
+            ranked.append(((info[2], info[1]), model))
+    return max(ranked)[1] if ranked else None
+
+
+def requested_model(model=None):
+    """Explicit model or alias, then APINEBULA_DEFAULT_MODEL, then the configured group's alias."""
     model = (model or os.environ.get("APINEBULA_DEFAULT_MODEL") or "").strip()
     if not model:
         only_nanobanana = has_key("nanobanana") and not has_key("gpt-image")
-        model = GROUPS["nanobanana" if only_nanobanana else "gpt-image"]["default_model"]
+        model = GROUPS["nanobanana" if only_nanobanana else "gpt-image"]["default_alias"]
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", model):
         raise UserError("Model name may contain only letters, digits, dot, underscore and hyphen")
-    return model
+    return canonical_alias(model) or model
+
+
+def list_models(group, direct=False):
+    """Model ids this group's key can call, or None when the list cannot be read."""
+    try:
+        key = get_key(group)
+    except UserError:
+        return None
+    try:
+        with session(direct) as s:
+            r = s.get(MODELS_API, headers={"Authorization": "Bearer " + key},
+                      timeout=(10, 30), allow_redirects=False)
+            if not 200 <= r.status_code < 300:
+                return None
+            data = r.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+        return None
+    return sorted({m["id"] for m in data["data"] if isinstance(m, dict) and isinstance(m.get("id"), str)})
+
+
+def resolve_model(requested, available, strict=False):
+    """Choose the model to call; returns (model, resolution, note).
+
+    resolution: "exact" (as requested), "latest" (alias resolved), "substituted"
+    (requested id is gone, newest of the same family used), "unchecked" (model
+    list unavailable, request sent as-is or with the alias fallback).
+    """
+    alias = canonical_alias(requested)
+    if available is None:
+        if alias:
+            fallback = ALIASES[alias]["fallback"]
+            return fallback, "unchecked", f"model list unavailable; using fallback {fallback} for {alias}"
+        return requested, "unchecked", "model list unavailable; model not verified"
+    if alias:
+        chosen = newest_in_family(ALIASES[alias]["family"], available)
+        if not chosen:
+            raise UserError(f"No {alias} model is available to this key; available: {', '.join(available) or 'none'}")
+        return chosen, "latest", None
+    if requested in available:
+        return requested, "exact", None
+    info = model_family(requested)
+    chosen = newest_in_family(info[0], available) if info else None
+    if chosen and not strict:
+        return chosen, "substituted", f"{requested} is not available to this key; using {chosen} from the same family"
+    hint = f" Closest available: {chosen}." if chosen else ""
+    raise UserError(f"Model {requested} is not available to this key.{hint} Available: {', '.join(available) or 'none'}. No request sent.")
 
 
 def https_url(value):
@@ -374,14 +472,37 @@ def upload_tmpfiles(image, mime, ext, direct=False, *, cached=None, checkpoint=N
         return verify_tmpfiles(s, value, image), metadata
 
 
-def submit(args):
-    if not getattr(args, "model", None) and (getattr(args, "continue_latest", False)
-                                             or getattr(args, "from_state", None)):
-        # Follow-up edits stay on the parent's model unless one is chosen explicitly.
+def remember_requested(state, args):
+    requested = getattr(args, "model_requested", None)
+    if requested and requested != args.model:
+        state["model_requested"] = requested
+
+
+def choose_model(args):
+    """Turn --model (id, alias or nothing) into a model this key can call, before any paid request."""
+    requested = getattr(args, "model", None)
+    if not requested and (getattr(args, "continue_latest", False) or getattr(args, "from_state", None)):
+        # Follow-up edits stay on the parent's model (or its successor) unless one is chosen.
         parent = parent_state(args, session_path(getattr(args, "session_file", None)))
         if parent and parent[1].get("model"):
-            args.model = parent[1]["model"]
-    args.model = resolve_model(getattr(args, "model", None))
+            requested = parent[1]["model"]
+    requested = requested_model(requested)
+    group = group_for(requested)
+    available = list_models(group, getattr(args, "direct", False))
+    model, resolution, note = resolve_model(requested, available, getattr(args, "strict_model", False))
+    if group_for(model) != group:
+        raise UserError(f"Model {model} does not belong to the {group} group")
+    args.model = model
+    args.model_requested = requested
+    if resolution != "exact":
+        info = {"model": model, "requested": requested, "resolution": resolution}
+        if note:
+            info["note"] = note
+        emit(**info)
+
+
+def submit(args):
+    choose_model(args)
     if group_for(args.model) == "nanobanana":
         args.out_dir.mkdir(parents=True, exist_ok=True)
         with task_lock(args.out_dir):
@@ -418,6 +539,7 @@ def submit_locked(args):
     args.out_dir.mkdir(parents=True, exist_ok=True)
     path = args.out_dir / "state.json"
     state = {"version": 2, "provider": "gpt-image", "phase": "preparing", "model": args.model, "uploads": []}
+    remember_requested(state, args)
     if selected:
         state["session_file"] = str(selected.resolve())
     if parent:
@@ -479,7 +601,7 @@ def submit_ready(path, state, prompt, quality, urls, key, direct):
         raise UserError("No valid task ID; keep state and check provider records before resubmitting")
     state.update(task_id=task, phase=result.get("status", "queued"))
     save(path, state)
-    emit(task_id=task, status=state["phase"], state_file=str(path.resolve()))
+    emit(task_id=task, status=state["phase"], model=state["model"], state_file=str(path.resolve()))
 
 
 def fetch_reference(url, direct=False):
@@ -552,6 +674,7 @@ def submit_gemini_locked(args):
         image_config["imageSize"] = size
     state = {"version": 2, "provider": "nanobanana", "phase": "preparing", "model": args.model,
              "uploads": [], "references": len(refs)}
+    remember_requested(state, args)
     if image_config:
         state["image_config"] = image_config
     if selected:
@@ -854,8 +977,11 @@ def models(args):
         raise UserError(f"HTTP {code}: {safe_code(data)}")
     ids = sorted({m["id"] for m in data.get("data", [])
                   if isinstance(m, dict) and isinstance(m.get("id"), str)})
-    default = GROUPS[args.group]["default_model"]
-    emit(group=args.group, models=ids, default_model=default, default_available=default in ids)
+    latest = {alias: newest_in_family(spec["family"], ids)
+              for alias, spec in ALIASES.items() if spec["group"] == args.group}
+    default_alias = GROUPS[args.group]["default_alias"]
+    emit(group=args.group, models=ids, latest=latest, default_alias=default_alias,
+         default_model=latest.get(default_alias), default_available=bool(latest.get(default_alias)))
 
 
 def configure_storage():
@@ -886,8 +1012,11 @@ def main_with_args(argv=None):
     s = sub.add_parser("submit")
     s.add_argument("--prompt-file", type=Path, required=True)
     s.add_argument("--out-dir", type=Path, required=True)
-    s.add_argument("--model", help="gpt-image-2.5 (async) or gemini-* (nanobanana); default: "
-                   "APINEBULA_DEFAULT_MODEL, else the configured group")
+    s.add_argument("--model", help="Alias gpt-image | nanobanana | nanobanana-pro (newest available "
+                   "model of that family) or an exact model id; default: APINEBULA_DEFAULT_MODEL, "
+                   "else the configured group's alias")
+    s.add_argument("--strict-model", action="store_true",
+                   help="Fail instead of using the newest same-family model when the exact id is gone")
     s.add_argument("--quality", choices=["low", "medium", "high", "auto"],
                    help="gpt-image only (default high)")
     s.add_argument("--aspect-ratio", choices=ASPECT_RATIOS, help="nanobanana only")

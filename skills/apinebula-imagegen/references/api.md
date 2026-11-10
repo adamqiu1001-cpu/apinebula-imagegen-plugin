@@ -10,6 +10,18 @@
 
 每个令牌属于一个分组。`GET https://apinebula.ai/v1/models`（带 Bearer Key）返回该令牌可用的模型；脚本的 `models --group ...` 就是调用它。2026-10-29 实测：nanobanana 分组令牌返回 `gemini-2.5-flash-image`、`gemini-2.5-flash-image-preview`、`gemini-3-pro-image-preview`、`gemini-3.1-flash-image`、`gemini-3.1-flash-image-preview`、`gemini-nano-banana-2.1`，不含 `gpt-image-2.5`；用它向异步接口提交 `gpt-image-2.5` 返回 HTTP 400。
 
+## 模型解析
+
+中转站会升级或下线模型，脚本不写死版本号：
+
+- 提交前用当前分组的 Key 请求 `GET /v1/models`，读出 `data[].id`。读取失败（网络、401、非 JSON）时不阻塞，按原名提交，别名则用内置备用名（`gpt-image-2.5`、`gemini-3.1-flash-image`、`gemini-3-pro-image-preview`），并在输出里标 `unchecked`。
+- 系列 = 模型名去掉结尾的 `-preview`/`-exp`/`-beta` 后，把第一个版本号换成 `{v}`。如 `gpt-image-2.5` 和 `gpt-image-2.6` 同属 `gpt-image-{v}`；`gemini-3.1-flash-image-preview` 属 `gemini-{v}-flash-image`；`gpt-image-2-4k` 属另一个系列 `gpt-image-{v}-4k`。
+- 选择：正式版优先，其次版本号（按数字逐段比较，2.10 > 2.9）。
+- 别名 `gpt-image` → `gpt-image-{v}`，`nanobanana` → `gemini-{v}-flash-image`，`nanobanana-pro` → `gemini-{v}-pro-image`。
+- 完整名字在列表里就照用；不在列表里就用同系列最新版（`--strict-model` 时报错）；同系列也没有就报错，不发付费请求。
+- 每次提交多一次只读请求，不缓存，避免用到已下线的模型。
+- 实测（2026-11-10，nanobanana Key）：`nanobanana` → `gemini-3.1-flash-image`，`nanobanana-pro` → `gemini-3-pro-image-preview`，`gemini-3.0-flash-image`（不存在）→ `gemini-3.1-flash-image`；用 `--model nanobanana` 真实出图成功。
+
 ## nanobanana（Gemini 原生格式，同步）
 
 - `POST https://img-api.apinebula.ai/v1beta/models/{model}:generateContent`，请求头 `Authorization: Bearer <nanobanana key>`。
@@ -28,7 +40,7 @@ Base URL 为 `https://apinebula.ai`，不是同步接口的 `https://img-api.api
 - `POST /v1/image-tasks/edits`：另加 `images: [{"image_url": "https://..."}]`。
 - `GET /v1/image-tasks/{task_id}?detail=true`：获取状态和结果。
 - 请求头 `Authorization: Bearer <APINebula key>`，正文 JSON。
-- 默认模型 `gpt-image-2.5`；使用 `response_format: "url"`。
+- 模型：脚本默认用别名 `gpt-image`，提交前解析成该 Key 可用的最新 `gpt-image-<版本>`（2026-10 文档里是 `gpt-image-2.5`）；使用 `response_format: "url"`。
 - 创建返回 `id`/`task_id`；状态 `queued`、`in_progress`、`completed`、`failed`。
 - 成功图片位于 `detail.data[0].download_url`。即使异步请求选择 b64_json，文档仍要求读取下载链接；不要拼接 CDN 地址。
 - 异步文档未列出精确像素 size、n、input_fidelity 支持；脚本不默默套用同步 API 参数。图像尺寸以实际输出为准。

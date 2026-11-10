@@ -29,6 +29,10 @@ class WorkflowCase(unittest.TestCase):
         self.key = patch.object(m, "get_key", return_value="test-key-never-log")
         self.key.start()
         self.addCleanup(self.key.stop)
+        # No network: the key's model list is simulated.
+        models = patch.object(m, "list_models", return_value=["gpt-image-2.5"])
+        models.start()
+        self.addCleanup(models.stop)
 
     def create(self, result=None):
         with patch.object(m, "api_call", return_value=result or {"id": "task_test", "status": "queued"}) as call:

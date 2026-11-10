@@ -1,8 +1,8 @@
 ---
 name: apinebula-imagegen
-description: Use when the user asks APINebula to generate or edit images, with gpt-image-2.5 or a nanobanana (Gemini) model such as gemini-3.1-flash-image, or asks for a further edit to an APINebula image already generated in the current chat without attaching it again. Works in Codex (ChatGPT desktop, CLI) and Claude Code on macOS and Windows.
+description: Use when the user asks APINebula to generate or edit images, with a gpt-image model (gpt-image-2.5 or any newer version) or a nanobanana (Gemini) model such as gemini-3.1-flash-image or newer, or asks for a further edit to an APINebula image already generated in the current chat without attaching it again. Works in Codex (ChatGPT desktop, CLI) and Claude Code on macOS and Windows.
 metadata:
-  short-description: APINebula 生图/改图，支持 gpt-image-2.5 与 nanobanana
+  short-description: APINebula 生图/改图，支持 gpt-image 与 nanobanana，自动跟随模型升级
 ---
 
 # APINebula 绘图
@@ -11,8 +11,8 @@ metadata:
 
 | 模型 | 分组 | 接口 | 本地参考图 |
 | --- | --- | --- | --- |
-| `gpt-image-2.5` 等 | gpt-image | 异步任务：提交 → 查询 → 下载 | 只收 HTTPS 链接，本地图要先临时上传 tmpfiles.org |
-| `gemini-3.1-flash-image` 等 `gemini-*` | nanobanana | 同步 `generateContent`，一次返回图片 | 直接内联发送，不经第三方 |
+| `gpt-image-*`（如 `gpt-image-2.5`） | gpt-image | 异步任务：提交 → 查询 → 下载 | 只收 HTTPS 链接，本地图要先临时上传 tmpfiles.org |
+| `gemini-*`（如 `gemini-3.1-flash-image`） | nanobanana | 同步 `generateContent`，一次返回图片 | 直接内联发送，不经第三方 |
 
 模型名是 APINebula 的标识，不代表已核实上游模型。
 
@@ -35,16 +35,25 @@ APINebula 的令牌只属于一个分组：gpt-image 分组的 Key 调不了 Gem
 | nanobanana | `APINEBULA_NANOBANANA_API_KEY` | `~/.config/codex-imagegen/apinebula-nanobanana-key` |
 
 - Key 由用户在自己的终端隐藏输入：`PY RUN configure-key --group nanobanana`（或 `--group gpt-image`）。把填好真实路径的命令给用户，不要在聊天里索取 Key，也不要读取、打印 Key 文件。
-- 不确定某把 Key 属于哪个分组、模型是否可用：`PY RUN models --group nanobanana`。只读，不建任务；`default_available: false` 说明这把 Key 调不了该分组默认模型。
+- 不确定某把 Key 属于哪个分组、模型是否可用：`PY RUN models --group nanobanana`。只读，不建任务；`latest` 是每个别名当前会解析到的模型，`default_available: false` 说明这把 Key 在该分组里没有可用模型。
 - 401/403，或 gpt-image 提交返回 400：先用 `models` 查分组，不要换模型冒充成功。
 
 ## 选模型
 
-- 用户说 nanobanana、Gemini、香蕉：`--model gemini-3.1-flash-image`；说要 Pro 或更高质量：`gemini-3-pro-image-preview`。点名其他 `gemini-*` 就用那个名字。
-- 用户说 gpt image、GPT：`--model gpt-image-2.5`。
-- 用户没说：不加 `--model`。脚本依次用 `APINEBULA_DEFAULT_MODEL`、只配了 nanobanana Key 时的 `gemini-3.1-flash-image`、其余情况的 `gpt-image-2.5`。
-- 连续修改不加 `--model` 时沿用上一张的模型。用户要换后端时显式加 `--model`。
-- 用户指定的模型不在 `models` 列表里时如实说明，不静默替换。
+中转站会升级模型（例如 `gpt-image-2.5` 换成 `gpt-image-2.6`），所以**默认用别名，不要自己写死版本号**。提交前脚本用这把 Key 查 `GET /v1/models`，把别名解析成当前可用的最新版本。
+
+| 用户说法 | `--model` | 解析到 |
+| --- | --- | --- |
+| nanobanana、Gemini、香蕉 | `nanobanana` | 最新的 `gemini-<版本>-flash-image` |
+| 要 Pro、更高质量 | `nanobanana-pro` | 最新的 `gemini-<版本>-pro-image` |
+| gpt image、GPT | `gpt-image` | 最新的 `gpt-image-<版本>` |
+
+- 同一系列里版本号最高的胜出；正式版优先于 `-preview`，系列里只有 preview 时才用 preview。带其他后缀的是另一个系列（如 `gpt-image-2-4k` 不算 `gpt-image`）。
+- 用户点名具体版本（"用 gpt-image-2.6"）时才写完整名字。这个名字可用就照用；已下线时脚本自动换成同系列最新版。用户明确要求"只用这个版本"时加 `--strict-model`，下线就报错，不发请求。
+- 用户没说：不加 `--model`。脚本依次用 `APINEBULA_DEFAULT_MODEL`（可以是别名或完整名）、只配了 nanobanana Key 时的 `nanobanana`、其余情况的 `gpt-image`。
+- 连续修改不加 `--model` 时沿用上一张的模型；那个模型已下线时换成同系列最新版。用户要换后端时显式加 `--model`。
+- 实际模型不是原样请求的那个时，`submit` 会先输出一行 `{"model": ..., "requested": ..., "resolution": ...}`：`latest` 是别名解析，`substituted` 是原模型已下线、换成了同系列，`unchecked` 是没读到模型列表、按原名（别名则用内置备用名）提交。`substituted` 和 `unchecked` 要在交付时告诉用户实际用了哪个模型。
+- 同系列也找不到时脚本报错并列出可用模型，不发付费请求；如实告诉用户，不要换成别的系列冒充。
 
 ## 先判断这次改哪张图
 
@@ -92,9 +101,9 @@ APINebula 的令牌只属于一个分组：gpt-image 分组的 Key 调不了 Gem
 2. 每个新任务用新的、语义明确的输出目录，**只提交一次**：
 
    ```text
-   PY RUN submit --prompt-file "prompt.txt" --out-dir "outputs/city-v1" --model gemini-3.1-flash-image --aspect-ratio 16:9 --image-size 2K
+   PY RUN submit --prompt-file "prompt.txt" --out-dir "outputs/city-v1" --model nanobanana --aspect-ratio 16:9 --image-size 2K
    PY RUN submit --prompt-file "edit.txt" --out-dir "outputs/city-v2" --continue
-   PY RUN submit --prompt-file "prompt.txt" --out-dir "outputs/poster-v1" --model gpt-image-2.5
+   PY RUN submit --prompt-file "prompt.txt" --out-dir "outputs/poster-v1" --model gpt-image
    PY RUN submit --prompt-file "edit.txt" --out-dir "outputs/older-edit" --from-state "outputs/city-v1/state.json"
    PY RUN submit --prompt-file "edit.txt" --out-dir "outputs/photo-edit" --image "/abs/reference.png"
    ```
@@ -111,7 +120,7 @@ APINebula 的令牌只属于一个分组：gpt-image 分组的 Key 调不了 Gem
    ```
 
    `--wait` 0–50 秒，`--interval` 5–30 秒。完成即下载并校验格式；仍是 `queued`/`in_progress` 就更新进度后继续查同一任务，不额外 sleep。约 10 分钟仍未完成时保留任务，说明未完成，不承诺后台持续运行。已下载的结果从本机读取，不再请求服务端。
-4. 拿到图片后查看一次本地文件，核对内容、尺寸、格式，然后交付：Codex 用绝对路径内嵌图片；Claude Code 用 Read 查看后给出绝对路径。同时给出模型标识和提示词文件。需要缩放或转格式时另存，不覆盖原图。正常出图的终点就是交付，不追加联网探测或重复查询。
+4. 拿到图片后查看一次本地文件，核对内容、尺寸、格式，然后交付：Codex 用绝对路径内嵌图片；Claude Code 用 Read 查看后给出绝对路径。同时给出实际使用的模型（输出里的 `model`）和提示词文件。需要缩放或转格式时另存，不覆盖原图。正常出图的终点就是交付，不追加联网探测或重复查询。
 
 ## 恢复与清理
 

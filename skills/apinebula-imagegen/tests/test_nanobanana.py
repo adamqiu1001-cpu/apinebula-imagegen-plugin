@@ -70,6 +70,12 @@ class NanoCase(unittest.TestCase):
         key = patch.object(m, "get_key", side_effect=lambda group="gpt-image": SECRET if group == "nanobanana" else "gpt-key")
         key.start()
         self.addCleanup(key.stop)
+        self.available = {"nanobanana": ["gemini-2.5-flash-image", "gemini-3-pro-image-preview",
+                                         "gemini-3.1-flash-image", "gemini-3.1-flash-image-preview"],
+                          "gpt-image": ["gpt-image-2.5"]}
+        models = patch.object(m, "list_models", side_effect=lambda group, direct=False: self.available[group])
+        models.start()
+        self.addCleanup(models.stop)
 
     def make_args(self, out, **extra):
         values = dict(prompt_file=self.prompt, out_dir=self.root / out, image=[], image_url=[],
@@ -97,20 +103,22 @@ class RoutingTests(NanoCase):
         self.assertEqual(m.group_for("gemini-3-pro-image-preview"), "nanobanana")
         self.assertEqual(m.group_for("gpt-image-2.5"), "gpt-image")
 
-    def test_default_model_follows_configured_keys(self):
+    def test_default_request_follows_configured_keys(self):
         with patch.dict(m.os.environ, {}, clear=True):
             with patch.object(m, "has_key", side_effect=lambda g: g == "nanobanana"):
-                self.assertEqual(m.resolve_model(None), "gemini-3.1-flash-image")
+                self.assertEqual(m.requested_model(None), "nanobanana")
             with patch.object(m, "has_key", return_value=True):
-                self.assertEqual(m.resolve_model(None), "gpt-image-2.5")
+                self.assertEqual(m.requested_model(None), "gpt-image")
             with patch.object(m, "has_key", return_value=False):
-                self.assertEqual(m.resolve_model(None), "gpt-image-2.5")
+                self.assertEqual(m.requested_model(None), "gpt-image")
         with patch.dict(m.os.environ, {"APINEBULA_DEFAULT_MODEL": "gemini-3-pro-image-preview"}, clear=True):
-            self.assertEqual(m.resolve_model(None), "gemini-3-pro-image-preview")
-        self.assertEqual(m.resolve_model("gpt-image-2.5"), "gpt-image-2.5")
+            self.assertEqual(m.requested_model(None), "gemini-3-pro-image-preview")
+        with patch.dict(m.os.environ, {"APINEBULA_DEFAULT_MODEL": "Gemini-Pro"}, clear=True):
+            self.assertEqual(m.requested_model(None), "nanobanana-pro")
+        self.assertEqual(m.requested_model("gpt-image-2.5"), "gpt-image-2.5")
         for bad in ("../x", "gemini 3", "a/b", "gemini:generate"):
             with self.subTest(bad=bad), self.assertRaises(m.UserError):
-                m.resolve_model(bad)
+                m.requested_model(bad)
 
     def test_group_keys_are_separate(self):
         with tempfile.TemporaryDirectory() as d:
