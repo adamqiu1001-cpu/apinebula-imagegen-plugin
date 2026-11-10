@@ -104,8 +104,8 @@ class ListModelsTests(unittest.TestCase):
         self.assertEqual(client.get.call_args.kwargs["headers"]["Authorization"], "Bearer k-secret")
 
     def test_failures_return_none(self):
-        with patch.object(m, "get_key", side_effect=m.UserError("missing")):
-            self.assertIsNone(m.list_models("gpt-image"))
+        with patch.object(m, "get_key", side_effect=m.UserError("missing")), self.assertRaises(m.UserError):
+            m.list_models("gpt-image")
         r = MagicMock(status_code=401)
         _, factory = self.fake_session(r)
         with patch.object(m, "get_key", return_value="k"), patch.object(m, "session", factory):

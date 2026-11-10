@@ -22,6 +22,13 @@
 - 每次提交多一次只读请求，不缓存，避免用到已下线的模型。
 - 实测（2026-11-10，nanobanana Key）：`nanobanana` → `gemini-3.1-flash-image`，`nanobanana-pro` → `gemini-3-pro-image-preview`，`gemini-3.0-flash-image`（不存在）→ `gemini-3.1-flash-image`；用 `--model nanobanana` 真实出图成功。
 
+## 错误响应怎么区分（2026-11-10 实测）
+
+- 没带 Key 或 Key 无效：HTTP 401，JSON，`error.message` 为"无效的令牌"，`error.type` 为 `new_api_error`。
+- Key 分组不对（如 nanobanana Key 调 gpt-image-2.5）：HTTP 400，JSON 错误。
+- Authorization 头里有控制字符（ESC 0x1b、DEL 0x7f 等，常见于终端粘贴的 `ESC[200~…ESC[201~`）：Cloudflare 在边缘直接返回 **HTTP 400、内容为空**，所有接口都一样，请求没到 APINebula。Tab、零宽空格、中文字符不会触发这个 400，而是得到 401。
+- 脚本据此处理：Key 在发送前只允许 0x21–0x7e，粘贴标记和 BOM 自动去掉；4xx（408 除外）视为明确拒绝、没有任务；空内容的 4xx 提示是网关拒绝。
+
 ## nanobanana（Gemini 原生格式，同步）
 
 - `POST https://img-api.apinebula.ai/v1beta/models/{model}:generateContent`，请求头 `Authorization: Bearer <nanobanana key>`。
