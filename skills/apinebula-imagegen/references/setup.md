@@ -64,14 +64,15 @@ Windows PowerShell：
 py -3 "$RUN" configure-key --group nanobanana
 ```
 
-| 分组 | 可用模型（以 `models` 实际返回为准） | 文件 | 环境变量 |
+| 分组 | 可用模型（举例，以 `models` 实际返回为准） | 文件 | 环境变量 |
 | --- | --- | --- | --- |
 | gpt-image | `gpt-image-2.5` | `~/.config/codex-imagegen/apinebula-api-key` | `APINEBULA_API_KEY` |
 | nanobanana | `gemini-3.1-flash-image`、`gemini-3-pro-image-preview`、`gemini-2.5-flash-image` 等 | `~/.config/codex-imagegen/apinebula-nanobanana-key` | `APINEBULA_NANOBANANA_API_KEY` |
 
 - 在 APINebula 控制台"令牌管理"创建对应分组的令牌，建议"模型可用列表"留空。不是 OpenAI、Google 或 Anthropic 的 Key。
-- 只配了一把也能用：脚本默认选已配置的那个分组。两把都配时默认 `gpt-image-2.5`，可设环境变量 `APINEBULA_DEFAULT_MODEL=gemini-3.1-flash-image` 改默认。
-- 检查 Key 属于哪个分组：`python3 "$RUN" models --group nanobanana`，输出该 Key 能用的模型列表，不建任务。
+- 只配了一把也能用：脚本默认选已配置的那个分组。两把都配时默认 `gpt-image`，可设环境变量 `APINEBULA_DEFAULT_MODEL=nanobanana` 改默认（也可以写完整模型名）。
+- 模型名不用写死：`--model gpt-image`、`nanobanana`、`nanobanana-pro` 每次提交前按这把 Key 的模型列表解析成最新版本，中转站从 2.5 升到 2.6 时不用改任何东西。写了完整名字但已下线时，自动换成同系列最新版并在输出里注明；加 `--strict-model` 则改为报错。
+- 检查 Key 属于哪个分组：`python3 "$RUN" models --group nanobanana`，输出该 Key 能用的模型列表和每个别名当前解析到的模型（`latest`），不建任务。
 - macOS 文件权限 0600；Windows 先用 `icacls` 关闭继承、只授权当前用户再写入，失败则不写入。它是限制权限的本地文件，不是加密保险库；不要同步或分享该目录。
 - 环境变量优先于文件。脚本不读取或修改 `OPENAI_API_KEY`，也不改 Codex/Claude 的模型配置。
 
@@ -104,8 +105,8 @@ Codex 按 `CODEX_THREAD_ID`、Claude Code 按 `CLAUDE_CODE_SESSION_ID` 隔离聊
 先写好 UTF-8 `prompt.txt`，在自己的工作目录执行：
 
 ```sh
-python3 "$RUN" submit --prompt-file prompt.txt --out-dir output/demo-nb --model gemini-3.1-flash-image --aspect-ratio 16:9 --image-size 2K
-python3 "$RUN" submit --prompt-file prompt.txt --out-dir output/demo-gpt --model gpt-image-2.5
+python3 "$RUN" submit --prompt-file prompt.txt --out-dir output/demo-nb --model nanobanana --aspect-ratio 16:9 --image-size 2K
+python3 "$RUN" submit --prompt-file prompt.txt --out-dir output/demo-gpt --model gpt-image
 python3 "$RUN" status --state output/demo-gpt/state.json --wait 40 --interval 10
 ```
 
@@ -115,7 +116,8 @@ nanobanana 的 `submit` 直接返回图片；gpt-image 需要 `status` 查询并
 
 - 启动器报 Python 版本不足：安装 Python 3.10+ 后重试。报依赖安装失败：检查网络/代理后重试，或删除上面的环境目录让它重建。
 - 401/403：Key 错误或分组不对。用 `models --group ...` 核对，用 `configure-key --group ...` 更新。环境变量已设置时先确认它没有覆盖新文件。
-- gpt-image 提交 400 `api_error`：多半是 Key 属于 nanobanana 分组。用 `models --group gpt-image` 看列表里有没有 `gpt-image-2.5`。
+- gpt-image 提交 400 `api_error`：多半是 Key 属于 nanobanana 分组。用 `models --group gpt-image` 看列表里有没有 `gpt-image-*`。
+- 报 `Model ... is not available to this key`：中转站下线了这个模型且同系列没有替代。按报错里列出的可用模型改 `--model`，或改用别名。
 - 额度不足或模型不可用：到控制台确认，不要换成其他模型冒充成功。
 - 代理/证书错误：保留 TLS 验证，先检查系统/企业代理及证书。确认能直连后可加 `--direct`，它不改全局网络设置。
 - gpt-image `submission_outcome_unknown` 且无任务编号：不要再提交，查平台任务/用量记录。已有任务编号：重复 `status`。

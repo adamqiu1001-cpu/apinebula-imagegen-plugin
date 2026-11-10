@@ -4,8 +4,10 @@
 
 | 模型 | APINebula 分组 | 方式 |
 | --- | --- | --- |
-| `gpt-image-2.5` | gpt-image | 异步任务：提交、查询、下载 |
-| `gemini-3.1-flash-image`（默认）、`gemini-3-pro-image-preview` 等 | nanobanana | 同步，一次返回图片；可设比例和 1K/2K/4K |
+| `gpt-image-*`（如 `gpt-image-2.5`） | gpt-image | 异步任务：提交、查询、下载 |
+| `gemini-*-flash-image`（默认）、`gemini-*-pro-image` 等 | nanobanana | 同步，一次返回图片；可设比例和 1K/2K/4K |
+
+模型版本不写死：每次提交前按你的 Key 查可用模型，自动用同系列最新版。中转站把 `gpt-image-2.5` 升级成 `gpt-image-2.6` 后不用改任何东西。
 
 连续修改（"再亮一点""改成白天"）自动沿用本聊天上一张成功出图，不用重复附图。
 
@@ -52,7 +54,7 @@ python3 "<技能目录>/scripts/run.py" configure-key --group gpt-image
 ## 用法
 
 - `用 nanobanana 画一张赛博朋克城市夜景，16:9，2K。`
-- `用 gpt-image-2.5 画一张雨后的森林，安静的水彩风格。`
+- `用 gpt image 画一张雨后的森林，安静的水彩风格。`（自动用最新版本；要指定版本就直接说，如 gpt-image-2.6）
 - `把上一张改成白天。`（沿用上一张的模型和图片）
 - `以我附上的图片为参考，换成夜景。`
 
