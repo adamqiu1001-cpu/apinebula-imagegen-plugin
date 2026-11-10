@@ -1,6 +1,6 @@
 {
   "name": "apinebula-imagegen",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Generate and edit images through APINebula with gpt-image (async tasks) or nanobanana Gemini models; model versions follow the provider's upgrades automatically.",
   "author": {
     "name": "adamqiu1001-cpu",

@@ -62,6 +62,42 @@ class UserError(Exception):
     """Only deliberately sanitized messages may use this exception."""
 
 
+class RejectedError(UserError):
+    """HTTP 4xx: the provider or a gateway refused the request, so no task was created."""
+
+
+# Terminals in bracketed-paste mode wrap pasted text in ESC[200~ ... ESC[201~.
+# Saved into a key file, those bytes make Cloudflare answer every request with
+# an empty HTTP 400 before it reaches APINebula.
+PASTE_MARKERS = re.compile(r"\x1b?\[20[01]~")
+
+
+def clean_key(raw, group="gpt-image", source="input"):
+    """Return (key, cleaned) after dropping paste markers and BOM; refuse any other odd character."""
+    value = PASTE_MARKERS.sub("", raw).replace("\ufeff", "").strip()
+    cleaned = value != raw.strip()
+    if not value:
+        raise UserError(f"{group} API key is empty ({source}); run configure-key --group {group}")
+    bad = [c for c in value if not "\x21" <= c <= "\x7e"]
+    if bad:
+        codes = ", ".join(sorted({f"U+{ord(c):04X}" for c in bad}))
+        raise UserError(f"{group} API key from {source} contains {len(bad)} invisible, space or non-ASCII "
+                        f"character(s) ({codes}); paste it again with configure-key --group {group}. "
+                        "The key itself is not shown")
+    return value, cleaned
+
+
+def refused(status):
+    """4xx means the request was refused and no task exists; 408 (timeout) may still have been received."""
+    return 400 <= status < 500 and status != 408
+
+
+def gateway_message(code):
+    return (f"HTTP {code} with an empty or non-JSON body: the request was rejected by the gateway before "
+            "reaching APINebula (usually invisible characters in the key, or a proxy altering the request). "
+            "No task was created. Check the key, then submit again in a new directory")
+
+
 def emit(**data):
     print(json.dumps(data, ensure_ascii=False), flush=True)
 
@@ -98,13 +134,16 @@ def private_file(path, content):
 
 def get_key(group="gpt-image"):
     spec = GROUPS[group]
-    value = os.environ.get(spec["env"])
+    value, source = os.environ.get(spec["env"]), "environment variable " + spec["env"]
     if not value and spec["file"].exists():
-        value = spec["file"].read_text(encoding="utf-8")
-    value = (value or "").strip()
-    if not value or any(c.isspace() for c in value):
-        raise UserError(f"{group} API key missing or invalid; run configure-key --group {group} in your terminal")
-    return value
+        value, source = spec["file"].read_text(encoding="utf-8"), "file " + str(spec["file"])
+    if not (value or "").strip():
+        raise UserError(f"{group} API key missing; run configure-key --group {group} in your terminal")
+    key, cleaned = clean_key(value, group, source)
+    if cleaned:
+        sys.stderr.write(f"[apinebula] ignored paste markers in the {group} key ({source}); "
+                         f"run configure-key --group {group} to rewrite it\n")
+    return key
 
 
 def has_key(group):
@@ -164,18 +203,22 @@ def requested_model(model=None):
 
 def list_models(group, direct=False):
     """Model ids this group's key can call, or None when the list cannot be read."""
-    try:
-        key = get_key(group)
-    except UserError:
-        return None
+    key = get_key(group)
     try:
         with session(direct) as s:
             r = s.get(MODELS_API, headers={"Authorization": "Bearer " + key},
                       timeout=(10, 30), allow_redirects=False)
-            if not 200 <= r.status_code < 300:
-                return None
-            data = r.json()
+            status = r.status_code
+            try:
+                data = r.json()
+            except ValueError:
+                data = None
     except Exception:
+        return None
+    if data is None and refused(status):
+        # The same key would be refused for the paid request too; stop before it.
+        raise UserError(gateway_message(status).replace(" Check the key, then submit again in a new directory", " Check the key; nothing was submitted"))
+    if not 200 <= status < 300:
         return None
     if not isinstance(data, dict) or not isinstance(data.get("data"), list):
         return None
@@ -261,17 +304,22 @@ def api_call(method, endpoint, key, direct=False, payload=None):
         r = s.request(method, API + endpoint, json=payload,
                       headers={"Authorization": "Bearer " + key},
                       timeout=(15, 90), allow_redirects=False)
+        status = r.status_code
         try:
             data = r.json()
         except ValueError:
-            raise UserError(f"HTTP {r.status_code}: non-JSON response; outcome may be unknown") from None
-        if not 200 <= r.status_code < 300:
+            if refused(status):
+                raise RejectedError(gateway_message(status)) from None
+            raise UserError(f"HTTP {status}: non-JSON response; outcome may be unknown") from None
+        if not 200 <= status < 300:
             # Do not echo server bodies: they can include prompts, URLs or credentials.
             code = safe_code(data)
             hint = ""
-            if r.status_code in (400, 401, 403) and method == "POST":
+            if status in (400, 401, 403) and method == "POST":
                 hint = "; if this key belongs to another group, run models --group gpt-image to list its models"
-            raise UserError(f"HTTP {r.status_code}: {code}; check provider task/usage records{hint}")
+            if refused(status):
+                raise RejectedError(f"HTTP {status}: {code}; the request was refused and no task was created{hint}")
+            raise UserError(f"HTTP {status}: {code}; check provider task/usage records{hint}")
         if not isinstance(data, dict):
             raise UserError("Unexpected response shape; outcome may be unknown")
         return data
@@ -488,6 +536,7 @@ def choose_model(args):
             requested = parent[1]["model"]
     requested = requested_model(requested)
     group = group_for(requested)
+    get_key(group)  # missing or malformed keys stop here, before anything is sent
     available = list_models(group, getattr(args, "direct", False))
     model, resolution, note = resolve_model(requested, available, getattr(args, "strict_model", False))
     if group_for(model) != group:
@@ -595,7 +644,13 @@ def submit_ready(path, state, prompt, quality, urls, key, direct):
     recovery = path.parent / "resume.json"
     if recovery.exists():
         recovery.unlink()
-    result = api_call("POST", "/edits" if urls else "/generations", key, direct, payload)
+    try:
+        result = api_call("POST", "/edits" if urls else "/generations", key, direct, payload)
+    except RejectedError as exc:
+        # A 4xx refusal creates no task, so the outcome is known: record it as failed.
+        state.update(phase="failed", error=str(exc)[:400])
+        save(path, state)
+        raise
     task = result.get("task_id") or result.get("id")
     if not isinstance(task, str) or not re.fullmatch(r"task_[A-Za-z0-9_-]+", task):
         raise UserError("No valid task ID; keep state and check provider records before resubmitting")
@@ -704,6 +759,10 @@ def submit_gemini_locked(args):
             data = None
     if not 200 <= code < 300:
         if data is None:
+            if refused(code):
+                state.update(phase="failed", error=f"HTTP {code}: gateway_rejected")
+                save(path, state)
+                raise UserError(gateway_message(code))
             raise UserError(f"HTTP {code}: non-JSON response; outcome unknown, check provider usage records before resubmitting")
         state.update(phase="failed", error=f"HTTP {code}: {safe_code(data)}")
         save(path, state)
@@ -861,6 +920,9 @@ def status_once(args):
     if state.get("provider") == "nanobanana":
         return status_gemini(args, state)
     task = state.get("task_id", "")
+    if not task and state.get("phase") == "failed":
+        emit(status="failed", error=state.get("error"), message="The request was refused; no task exists. Fix the cause and submit again in a new directory.")
+        return "failed"
     if not re.fullmatch(r"task_[A-Za-z0-9_-]+", task):
         raise UserError("No task ID saved; inspect provider task/usage records, do not resubmit blindly")
     if state.get("phase") == "completed" and state.get("output"):
@@ -940,12 +1002,16 @@ def cleanup(args):
 
 
 def configure_key(group="gpt-image"):
-    key = getpass.getpass(f"APINebula {group} group API Key (hidden): ").strip()
-    if not key or any(c.isspace() for c in key):
-        raise UserError("Empty or malformed key")
+    raw = getpass.getpass(f"APINebula {group} group API Key (hidden): ")
+    key, cleaned = clean_key(raw, group, "the pasted text")
     target = GROUPS[group]["file"]
     private_file(target, key + "\n")
-    emit(configured=True, group=group, file=str(target))
+    result = {"configured": True, "group": group, "file": str(target), "length": len(key)}
+    if cleaned:
+        result["removed"] = "terminal paste markers"
+    if os.environ.get(GROUPS[group]["env"]):
+        result["warning"] = f"{GROUPS[group]['env']} is set and overrides this file"
+    emit(**result)
 
 
 def ping(args):
@@ -972,9 +1038,12 @@ def models(args):
         except ValueError:
             data = None
     if data is None:
+        if refused(code):
+            raise UserError(gateway_message(code).replace(" Check the key, then submit again in a new directory", " Check the key"))
         raise UserError(f"HTTP {code}: non-JSON response")
     if not 200 <= code < 300:
-        raise UserError(f"HTTP {code}: {safe_code(data)}")
+        hint = "; the key is invalid or revoked" if code == 401 else ""
+        raise UserError(f"HTTP {code}: {safe_code(data)}{hint}")
     ids = sorted({m["id"] for m in data.get("data", [])
                   if isinstance(m, dict) and isinstance(m.get("id"), str)})
     latest = {alias: newest_in_family(spec["family"], ids)

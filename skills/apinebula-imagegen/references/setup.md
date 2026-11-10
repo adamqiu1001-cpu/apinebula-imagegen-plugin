@@ -115,7 +115,8 @@ nanobanana 的 `submit` 直接返回图片；gpt-image 需要 `status` 查询并
 ## 故障恢复
 
 - 启动器报 Python 版本不足：安装 Python 3.10+ 后重试。报依赖安装失败：检查网络/代理后重试，或删除上面的环境目录让它重建。
-- 401/403：Key 错误或分组不对。用 `models --group ...` 核对，用 `configure-key --group ...` 更新。环境变量已设置时先确认它没有覆盖新文件。
+- 401/403：Key 错误或分组不对。用 `models --group ...` 核对，用 `configure-key --group ...` 更新。环境变量已设置时先确认它没有覆盖新文件（`configure-key` 发现同名环境变量时会提示）。
+- 报 "contains ... invisible, space or non-ASCII character(s)" 或 "rejected by the gateway"（HTTP 400 且没有内容）：Key 里有看不见的字符，请求在 Cloudflare 网关就被拒绝，没到 APINebula，也没建任务。重新运行 `configure-key --group ...` 粘贴 Key，成功后输出里的 `length` 应等于 Key 的字符数。终端粘贴标记和 BOM 会被自动去掉；仍报错时换一个终端窗口粘贴，或检查代理是否改写了请求头。
 - gpt-image 提交 400 `api_error`：多半是 Key 属于 nanobanana 分组。用 `models --group gpt-image` 看列表里有没有 `gpt-image-*`。
 - 报 `Model ... is not available to this key`：中转站下线了这个模型且同系列没有替代。按报错里列出的可用模型改 `--model`，或改用别名。
 - 额度不足或模型不可用：到控制台确认，不要换成其他模型冒充成功。
