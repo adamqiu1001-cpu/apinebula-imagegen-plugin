@@ -80,8 +80,7 @@ class ResolveTests(unittest.TestCase):
         with self.assertRaises(m.UserError):
             m.resolve_model("dall-e", ["gpt-image-2.6"])
 
-    def test_unreadable_list_falls_back_without_blocking(self):
-        self.assertEqual(m.resolve_model("gpt-image", None)[:2], ("gpt-image-2.5", "unchecked"))
+    def test_unreadable_list_preserves_banana_fallback_and_explicit_id(self):
         self.assertEqual(m.resolve_model("nanobanana", None)[:2], ("gemini-3.1-flash-image", "unchecked"))
         self.assertEqual(m.resolve_model("gpt-image-2.6", None)[:2], ("gpt-image-2.6", "unchecked"))
 
@@ -157,6 +156,19 @@ class SubmitTests(unittest.TestCase):
         lines = [json.loads(line) for line in out.getvalue().splitlines()]
         self.assertEqual(lines[0], {"model": "gpt-image-2.6", "requested": "gpt-image", "resolution": "latest"})
         self.assertEqual(lines[-1]["model"], "gpt-image-2.6")
+
+    def test_gpt_alias_stops_before_upload_or_submit_if_list_unavailable(self):
+        self.available["gpt-image"] = None
+        image = self.root / "ref.png"
+        Image.new("RGB", (4, 4)).save(image)
+        for model in (None, "gpt-image", "gpt"):
+            args = self.args(model or "default", model=model, image=[image])
+            with self.subTest(model=model), patch.object(m, "upload_tmpfiles") as upload, patch.object(m, "api_call") as api:
+                with self.assertRaisesRegex(m.UserError, "models --group gpt-image"):
+                    m.submit(args)
+                upload.assert_not_called()
+                api.assert_not_called()
+                self.assertFalse(args.out_dir.exists())
 
     def test_old_explicit_name_still_works_after_upgrade(self):
         args = self.args("old-name", model="gpt-image-2.5")

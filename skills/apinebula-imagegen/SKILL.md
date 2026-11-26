@@ -53,7 +53,8 @@ APINebula 的令牌只属于一个分组：gpt-image 分组的 Key 调不了 Gem
 - 用户点名具体版本（"用 gpt-image-2.6"）时才写完整名字。这个名字可用就照用；已下线时脚本自动换成同系列最新版。用户明确要求"只用这个版本"时加 `--strict-model`，下线就报错，不发请求。
 - 用户没说：不加 `--model`。脚本依次用 `APINEBULA_DEFAULT_MODEL`（可以是别名或完整名）、只配了 nanobanana Key 时的 `nanobanana`、其余情况的 `gpt-image`。
 - 连续修改不加 `--model` 时沿用上一张的模型；那个模型已下线时换成同系列最新版。用户要换后端时显式加 `--model`。
-- 实际模型不是原样请求的那个时，`submit` 会先输出一行 `{"model": ..., "requested": ..., "resolution": ...}`：`latest` 是别名解析，`substituted` 是原模型已下线、换成了同系列，`unchecked` 是没读到模型列表、按原名（别名则用内置备用名）提交。`substituted` 和 `unchecked` 要在交付时告诉用户实际用了哪个模型。
+- `gpt-image` 别名需要当前 Key 的模型列表。查询失败时，脚本在上传参考图和创建任务前停止。运行 `PY RUN models --group gpt-image`，查询恢复后再用原别名提交。
+- `submit` 的 `resolution` 字段说明实际选用的模型。`latest` 表示别名解析成功，`substituted` 表示改用同系列最新版，`unchecked` 表示查询失败时沿用具体模型名或使用 Banana 的内置备用名。后两种情况在交付时说明实际模型。
 - 同系列也找不到时脚本报错并列出可用模型，不发付费请求；如实告诉用户，不要换成别的系列冒充。
 
 ## 先判断这次改哪张图
