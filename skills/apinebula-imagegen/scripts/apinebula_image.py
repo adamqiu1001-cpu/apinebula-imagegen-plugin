@@ -41,7 +41,7 @@ GROUPS = {
 # code change. A family is the model name with its version number replaced by
 # {v}; "fallback" is used only when the model list cannot be read.
 ALIASES = {
-    "gpt-image": {"group": "gpt-image", "family": "gpt-image-{v}", "fallback": "gpt-image-2.5"},
+    "gpt-image": {"group": "gpt-image", "family": "gpt-image-{v}"},
     "nanobanana": {"group": "nanobanana", "family": "gemini-{v}-flash-image",
                    "fallback": "gemini-3.1-flash-image"},
     "nanobanana-pro": {"group": "nanobanana", "family": "gemini-{v}-pro-image",
@@ -245,7 +245,10 @@ def resolve_model(requested, available, strict=False):
     alias = canonical_alias(requested)
     if available is None:
         if alias:
-            fallback = ALIASES[alias]["fallback"]
+            fallback = ALIASES[alias].get("fallback")
+            if fallback is None:
+                raise UserError(f"Cannot resolve {alias}: model list unavailable. "
+                                f"Run models --group {ALIASES[alias]['group']} and retry. No image request sent.")
             return fallback, "unchecked", f"model list unavailable; using fallback {fallback} for {alias}"
         return requested, "unchecked", "model list unavailable; model not verified"
     if alias:

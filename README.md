@@ -9,6 +9,8 @@
 
 模型版本不写死：每次提交前按你的 Key 查可用模型，自动用同系列最新版。中转站把 `gpt-image-2.5` 升级成 `gpt-image-2.6` 后不用改任何东西。
 
+使用 `gpt-image` 别名时，如果模型列表暂时不可用，插件会在上传参考图和创建任务前停止。等 `models --group gpt-image` 能列出模型后，再用原命令提交即可。
+
 连续修改（"再亮一点""改成白天"）自动沿用本聊天上一张成功出图，不用重复附图。
 
 本仓库由只支持 Codex 和 gpt-image 的 [apinebula-imagegen](https://github.com/adamqiu1001-cpu/apinebula-imagegen) 改造而来。

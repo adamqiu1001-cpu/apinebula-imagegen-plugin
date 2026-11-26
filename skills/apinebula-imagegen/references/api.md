@@ -14,7 +14,7 @@
 
 中转站会升级或下线模型，脚本不写死版本号：
 
-- 提交前用当前分组的 Key 请求 `GET /v1/models`，读出 `data[].id`。读取失败（网络、401、非 JSON）时不阻塞，按原名提交，别名则用内置备用名（`gpt-image-2.5`、`gemini-3.1-flash-image`、`gemini-3-pro-image-preview`），并在输出里标 `unchecked`。
+- 提交前用当前分组的 Key 请求 `GET /v1/models`，读出 `data[].id`。模型列表不可用时，`gpt-image` 别名在参考图上传和提交前报错。具体模型名可按原名提交；Banana 别名可使用内置备用名，这两种情况标记为 `unchecked`。网关明确拒绝凭据时直接报错。
 - 系列 = 模型名去掉结尾的 `-preview`/`-exp`/`-beta` 后，把第一个版本号换成 `{v}`。如 `gpt-image-2.5` 和 `gpt-image-2.6` 同属 `gpt-image-{v}`；`gemini-3.1-flash-image-preview` 属 `gemini-{v}-flash-image`；`gpt-image-2-4k` 属另一个系列 `gpt-image-{v}-4k`。
 - 选择：正式版优先，其次版本号（按数字逐段比较，2.10 > 2.9）。
 - 别名 `gpt-image` → `gpt-image-{v}`，`nanobanana` → `gemini-{v}-flash-image`，`nanobanana-pro` → `gemini-{v}-pro-image`。
