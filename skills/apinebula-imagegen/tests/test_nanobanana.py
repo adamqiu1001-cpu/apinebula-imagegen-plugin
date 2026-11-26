@@ -10,6 +10,9 @@ import unittest
 from unittest.mock import patch, MagicMock
 
 from PIL import Image
+from requests import Response
+from requests.exceptions import ConnectionError, ConnectTimeout, ProxyError, ReadTimeout, SSLError
+from urllib3.exceptions import ReadTimeoutError
 
 SPEC = importlib.util.spec_from_file_location("apinebula_image_nb", Path(__file__).parents[1] / "scripts/apinebula_image.py")
 m = importlib.util.module_from_spec(SPEC)
@@ -18,9 +21,9 @@ SPEC.loader.exec_module(m)
 SECRET = "nb-test-key-never-log"
 
 
-def png_bytes(color="red", size=(12, 8), fmt="PNG"):
+def png_bytes(color="red", size=(12, 8), fmt="PNG", **options):
     buf = io.BytesIO()
-    Image.new("RGB", size, color).save(buf, fmt)
+    Image.new("RGB", size, color).save(buf, fmt, **options)
     return buf.getvalue()
 
 
@@ -211,10 +214,78 @@ class GenerationTests(NanoCase):
         self.assertEqual(base64.b64decode(parts[1]["inlineData"]["data"]), image.read_bytes())
         self.assertEqual(self.state(args)["uploads"], [])
 
+    def assert_smaller_jpeg(self, inline, original, size):
+        sent = base64.b64decode(inline["data"])
+        self.assertEqual(inline["mimeType"], "image/jpeg")
+        self.assertLess(len(sent), len(original))
+        with Image.open(io.BytesIO(sent)) as decoded:
+            self.assertEqual((decoded.format, decoded.size), ("JPEG", size))
+            decoded.load()
+
+    def test_local_opaque_png_is_inlined_as_smaller_jpeg_without_changing_source(self):
+        image = self.root / "本地 大图.png"
+        size = (512, 256)
+        original = png_bytes("steelblue", size, compress_level=0)
+        image.write_bytes(original)
+        args = self.make_args("smaller", image=[image])
+        client = self.run_submit(args)
+        parts = client.post.call_args.kwargs["json"]["contents"][0]["parts"]
+        self.assert_smaller_jpeg(parts[1]["inlineData"], original, size)
+        self.assertEqual(image.read_bytes(), original)
+        self.assertTrue((args.out_dir / "image.png").is_file())
+        client.post.assert_called_once()
+
+    def test_local_references_with_transparency_animation_or_color_profile_stay_unchanged(self):
+        size = (64, 64)
+        palette = Image.new("P", size)
+        palette.putpalette([0, 0, 0, 255, 0, 0] + [0] * 762)
+        fixtures = (
+            ("alpha", Image.new("RGBA", size, (10, 20, 30, 64)), {}),
+            ("color-key", Image.new("RGB", size, (1, 2, 3)), {"transparency": (1, 2, 3)}),
+            ("palette", palette, {"transparency": 0}),
+            ("animation", Image.new("RGB", size, "red"),
+             {"save_all": True, "append_images": [Image.new("RGB", size, "blue")]}),
+            ("profile", Image.new("RGB", size, "green"), {"icc_profile": b"test profile"}),
+        )
+        paths = []
+        for name, image, options in fixtures:
+            path = self.root / (name + ".png")
+            image.save(path, compress_level=0, **options)
+            paths.append(path)
+        jpeg = self.root / "existing.jpg"
+        jpeg.write_bytes(png_bytes("purple", size, fmt="JPEG"))
+        client = self.run_submit(self.make_args("unchanged", image=[*paths, jpeg]))
+        parts = client.post.call_args.kwargs["json"]["contents"][0]["parts"]
+        for path, part in zip([*paths, jpeg], parts[1:], strict=True):
+            with self.subTest(path=path.name):
+                self.assertEqual(part["inlineData"]["mimeType"], "image/jpeg" if path == jpeg else "image/png")
+                self.assertEqual(base64.b64decode(part["inlineData"]["data"]), path.read_bytes())
+
+    def test_keep_reference_format_sends_original_local_png(self):
+        image = self.root / "original.png"
+        original = png_bytes("gold", (128, 128), compress_level=0)
+        image.write_bytes(original)
+        client = self.run_submit(self.make_args("lossless", image=[image], keep_reference_format=True))
+        parts = client.post.call_args.kwargs["json"]["contents"][0]["parts"]
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+        self.assertEqual(base64.b64decode(parts[1]["inlineData"]["data"]), original)
+
+    def test_jpeg_encoder_failure_sends_original_local_png(self):
+        image = self.root / "fallback.png"
+        original = png_bytes("blue", (128, 128), compress_level=0)
+        image.write_bytes(original)
+        with patch.object(Image.Image, "save", side_effect=OSError("JPEG encoder unavailable")):
+            client = self.run_submit(self.make_args("fallback", image=[image]),
+                                     post=response(200, gemini_ok(original)))
+        parts = client.post.call_args.kwargs["json"]["contents"][0]["parts"]
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+        self.assertEqual(base64.b64decode(parts[1]["inlineData"]["data"]), original)
+
     def test_online_reference_fetched_without_credentials(self):
         ref = MagicMock()
         ref.is_redirect = False
-        ref.iter_content.return_value = [png_bytes("green")]
+        original = png_bytes("green", (128, 128), compress_level=0)
+        ref.iter_content.return_value = [original]
         ref.__enter__.return_value = ref
         ref.__exit__.return_value = False
         args = self.make_args("url", image_url=["https://example.com/ref.png"])
@@ -226,6 +297,22 @@ class GenerationTests(NanoCase):
         self.assertEqual(fake.client.get.call_args.args[0], "https://example.com/ref.png")
         parts = fake.client.post.call_args.kwargs["json"]["contents"][0]["parts"]
         self.assertEqual(len(parts), 2)
+        self.assertEqual(parts[1]["inlineData"]["mimeType"], "image/png")
+        self.assertEqual(base64.b64decode(parts[1]["inlineData"]["data"]), original)
+
+    def test_local_png_parent_is_optimized_for_both_followup_options(self):
+        first = self.make_args("png-parent")
+        size = (512, 256)
+        original = png_bytes("white", size, compress_level=0)
+        self.run_submit(first, post=response(200, gemini_ok(original)))
+        explicit = self.make_args("from-parent", from_state=first.out_dir / "state.json")
+        latest = self.make_args("continue-parent", continue_latest=True)
+        for args in (latest, explicit):
+            with self.subTest(args=args.out_dir.name):
+                client = self.run_submit(args)
+                parts = client.post.call_args.kwargs["json"]["contents"][0]["parts"]
+                self.assert_smaller_jpeg(parts[1]["inlineData"], original, size)
+        self.assertEqual((first.out_dir / "image.png").read_bytes(), original)
 
     def test_continue_from_nanobanana_parent_inlines_local_image(self):
         first = self.make_args("v1")
@@ -307,23 +394,88 @@ class FailureTests(NanoCase):
             self.run_submit(args, post=response(502, json_error=True))
         self.assertEqual(self.state(args)["phase"], "submission_outcome_unknown")
 
-    def test_transport_error_is_not_retried_and_status_refuses(self):
-        args = self.make_args("timeout")
-        calls = []
+    def test_json_gateway_errors_keep_outcome_unknown(self):
+        for code in (408, 502, 524):
+            with self.subTest(code=code):
+                args = self.make_args(f"gateway-{code}")
+                fake = FakeSession(post=response(code, {"error": {"status": "PROVIDER_BODY"}}))
+                out = io.StringIO()
+                with patch.object(m, "session", fake), patch("sys.stdout", out), self.assertRaises(m.UserError) as err:
+                    m.submit(args)
+                fake.client.post.assert_called_once()
+                state = self.state(args)
+                self.assertEqual(state["phase"], "submission_outcome_unknown")
+                self.assertEqual(state["diagnostic"]["http_status"], code)
+                self.assertIn("outcome unknown", str(err.exception))
+                fake.client.post.return_value.json.assert_not_called()
+                self.assertNotIn("PROVIDER_BODY", str(err.exception) + json.dumps(state) + out.getvalue())
 
-        def boom(*a, **k):
-            calls.append(1)
-            raise TimeoutError("read timeout")
-        with self.assertRaises(TimeoutError):
-            self.run_submit(args, post=boom)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(self.state(args)["phase"], "submission_outcome_unknown")
+    def run_interrupted_edit(self, name, fake, expected_reason, expected_stage, http_status=None):
+        ref = self.root / "参考图.png"
+        ref.write_bytes(png_bytes())
+        args = self.make_args(name)
+        argv = ["submit", "--prompt-file", str(self.prompt), "--out-dir", str(args.out_dir),
+                "--model", "nanobanana", "--image", str(ref), "--session-file", str(self.session_file)]
+        out = io.StringIO()
+        with patch.object(m, "session", fake), patch("sys.stdout", out):
+            self.assertEqual(m.main_with_args(argv), 1)
+        fake.client.post.assert_called_once()
+        state = self.state(args)
+        self.assertEqual(state["phase"], "submission_outcome_unknown")
+        result = json.loads(out.getvalue().splitlines()[-1])
+        self.assertIn("no task ID", result["error"])
+        self.assertIn("usage", result["error"])
+        diagnostic = state["diagnostic"]
+        self.assertEqual(diagnostic["reason"], expected_reason)
+        self.assertEqual(diagnostic["stage"], expected_stage)
+        self.assertEqual(diagnostic.get("http_status"), http_status)
+        self.assertGreaterEqual(diagnostic["elapsed_seconds"], 0)
+        self.assertIsNotNone(m.datetime.fromisoformat(state["submission_started_at"]).utcoffset())
+        self.assertEqual(result["diagnostic"], diagnostic)
+        for secret in (SECRET, "sig=secret", "proxy-password"):
+            self.assertNotIn(secret, json.dumps(state) + out.getvalue())
+        self.assertFalse(list(args.out_dir.glob("image.*")))
         state_args = argparse.Namespace(state=args.out_dir / "state.json", direct=False, wait=0, interval=10)
-        with self.assertRaises(m.UserError):
-            m.status(state_args)
-        with self.assertRaises(m.UserError):
-            m.resume(state_args)
+        with patch.object(m, "session", side_effect=AssertionError("no network")):
+            with self.assertRaises(m.UserError):
+                m.status(state_args)
+            with self.assertRaises(m.UserError):
+                m.resume(state_args)
         self.assertFalse((args.out_dir / "resume.lock").exists())
+
+    def test_transport_setup_errors_never_trigger_a_retry(self):
+        for exception, reason in ((ConnectTimeout, "connect_timeout"), (SSLError, "tls_error")):
+            with self.subTest(reason=reason):
+                self.run_interrupted_edit(reason, FakeSession(post=exception("sig=secret")),
+                                          reason, "waiting_for_headers")
+
+    def test_interrupted_edit_distinguishes_proxy_timeout_and_generic_connection(self):
+        for exception, reason in ((ProxyError, "proxy_error"), (ReadTimeout, "read_timeout"),
+                                  (ConnectionError, "connection_error")):
+            with self.subTest(reason=reason):
+                fake = FakeSession(post=exception(f"https://proxy-password@example.com/?sig=secret&key={SECRET}"))
+                self.run_interrupted_edit(reason, fake, reason, "waiting_for_headers")
+
+    def test_read_timeout_in_partial_image_response_is_not_reported_as_connection_setup(self):
+        # Use Requests' actual response reader: it wraps urllib3 read timeouts in ConnectionError.
+        class PartialBody:
+            def stream(self, *args, **kwargs):
+                yield b'{"candidates": ['
+                raise ReadTimeoutError(None, "https://example.com/?sig=secret", SECRET)
+
+        result = Response()
+        result.status_code = 200
+        result.raw = PartialBody()
+        fake = FakeSession()
+        fake.client.post.return_value = result
+        with patch.object(result, "close") as close:
+            self.run_interrupted_edit("partial", fake, "read_timeout", "reading_body", 200)
+        self.assertTrue(fake.client.post.call_args.kwargs["stream"])
+        close.assert_called_once()
+
+    def test_http_success_without_valid_json_has_unknown_outcome(self):
+        self.run_interrupted_edit("invalid-json", FakeSession(post=response(200, json_error=True)),
+                                  "invalid_response", "reading_body", 200)
 
     def test_answer_without_image_is_failed_not_retried(self):
         args = self.make_args("blocked")
@@ -335,7 +487,7 @@ class FailureTests(NanoCase):
         state = self.state(args)
         self.assertEqual(state["phase"], "failed")
         self.assertEqual(state["finish_reason"], "IMAGE_SAFETY")
-        self.assertIn("I can't help", out.getvalue())
+        self.assertNotIn("I can't help", out.getvalue())
 
     def test_corrupt_image_data_is_failed(self):
         args = self.make_args("corrupt")
@@ -371,11 +523,13 @@ class ModelsCommandTests(NanoCase):
 
     def test_cli_parses_new_options(self):
         argv = ["apinebula_image.py", "submit", "--prompt-file", str(self.prompt), "--out-dir", str(self.root / "cli"),
-                "--model", "gemini-3.1-flash-image", "--aspect-ratio", "9:16", "--image-size", "4K"]
+                "--model", "gemini-3.1-flash-image", "--aspect-ratio", "9:16", "--image-size", "4K",
+                "--keep-reference-format"]
         with patch.object(m.sys, "argv", argv), patch.object(m, "submit") as submit:
             self.assertEqual(m.main(), 0)
         parsed = submit.call_args.args[0]
         self.assertEqual((parsed.aspect_ratio, parsed.image_size, parsed.quality), ("9:16", "4K", None))
+        self.assertTrue(parsed.keep_reference_format)
         with patch.object(m.sys, "argv", ["apinebula_image.py", "configure-key", "--group", "nanobanana"]), \
                 patch.object(m, "configure_key") as configure:
             self.assertEqual(m.main(), 0)

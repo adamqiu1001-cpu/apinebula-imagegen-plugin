@@ -60,6 +60,10 @@ python3 "<技能目录>/scripts/run.py" configure-key --group gpt-image
 
 本地参考图：nanobanana 直接内联发给 APINebula；gpt-image 的异步接口只收链接，会临时上传到 tmpfiles.org（一小时后由服务方删除，有效期内持有直链者可访问），上传前会先征得你同意。
 
+Banana 图生图默认优化本地参考图（包括用上一张续改）：符合条件的静态、不透明 PNG 仅在转为高质量 JPEG 后更小时才以 JPEG 发送，尺寸和原文件不变。带透明通道、动画或自定义色彩配置的 PNG 不转码，在线参考图和生成结果也不转码。JPEG 有轻微失真；需要原样发送时，直接说「保留原始 PNG」，或加 `--keep-reference-format`。
+
+Banana 请求中断时，先保留输出目录中的 `state.json`，用 `submission_started_at` 核对平台用量。`diagnostic` 只记录失败阶段、错误类别、耗时和已收到的 HTTP 状态；没有可查询的任务编号，也不会自动重发。
+
 详见 [安装与配置](skills/apinebula-imagegen/references/setup.md)、[Skill 指令](skills/apinebula-imagegen/SKILL.md)、[验证记录](验证记录.md)。
 
 ## 仓库结构
