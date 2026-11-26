@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urljoin
 from html.parser import HTMLParser
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from time import monotonic, sleep
 
 API = "https://apinebula.ai/v1/image-tasks"
@@ -60,6 +60,16 @@ MIME_EXT = {"PNG": ("image/png", ".png"), "JPEG": ("image/jpeg", ".jpg"),
 
 class UserError(Exception):
     """Only deliberately sanitized messages may use this exception."""
+
+
+class GeminiOutcomeUnknown(UserError):
+    """A synchronous request may already have run; record only safe diagnostics."""
+
+    def __init__(self, message, diagnostic, path):
+        super().__init__(message + "; outcome unknown. nanobanana has no task ID. "
+                         "Keep state.json and check provider usage before resubmitting. No request retried.")
+        self.diagnostic = diagnostic
+        self.state_file = str(path.resolve())
 
 
 class RejectedError(UserError):
@@ -683,6 +693,34 @@ def fetch_reference(url, direct=False):
     return data, image_info(data)[0]
 
 
+def local_gemini_reference(path, keep_format=False):
+    """Optimize a local Gemini reference in memory, without touching the original."""
+    from PIL import Image
+
+    with path.open("rb") as f:
+        data = f.read(MAX_IMAGE_BYTES + 1)
+    if len(data) > MAX_IMAGE_BYTES:
+        raise UserError("Image exceeds this helper's 20 MiB limit; resize a copy first")
+    mime, _, (width, height) = image_info(data)
+    # Byte 24 of a validated PNG is the IHDR bit depth. Pillow can expose
+    # 16-bit truecolor PNGs as RGB, so checking the Pillow mode alone is insufficient.
+    if keep_format or mime != "image/png" or data[24] != 8 or width * height > 4096 ** 2:
+        return data, mime
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            if (im.mode not in ("RGB", "L") or im.get_format_mimetype() != "image/png"
+                    or any(key in im.info for key in ("transparency", "icc_profile", "gamma", "chromaticity", "exif"))):
+                return data, mime
+            with io.BytesIO() as buf:
+                im.save(buf, "JPEG", quality=92, subsampling=0, optimize=True)
+                if buf.tell() < len(data):
+                    return buf.getvalue(), "image/jpeg"
+    except (OSError, ValueError):
+        # Compression is optional; keep the validated source on codec errors.
+        pass
+    return data, mime
+
+
 def gemini_hint(status_code):
     if status_code in (401, 403):
         return "; check that the key belongs to the nanobanana group (models --group nanobanana)"
@@ -693,8 +731,39 @@ def gemini_hint(status_code):
     return ""
 
 
+def gemini_unknown(path, state, started, stage, reason, message, http_status=None):
+    diagnostic = {"stage": stage, "reason": reason, "elapsed_seconds": round(monotonic() - started, 2)}
+    if http_status is not None:
+        diagnostic["http_status"] = http_status
+    state["diagnostic"] = diagnostic
+    save(path, state)
+    return GeminiOutcomeUnknown(message, diagnostic, path)
+
+
+def gemini_transport_failure(exc):
+    from requests import exceptions
+    from urllib3.exceptions import ReadTimeoutError
+
+    if isinstance(exc, exceptions.ProxyError):
+        return "proxy_error", "Proxy connection failed"
+    if isinstance(exc, exceptions.SSLError):
+        return "tls_error", "TLS connection failed"
+    if isinstance(exc, exceptions.ConnectTimeout):
+        return "connect_timeout", "Connection setup timed out"
+    # Requests wraps urllib3 timeouts while consuming the body in ConnectionError.
+    if isinstance(exc, exceptions.ReadTimeout) or any(isinstance(arg, ReadTimeoutError) for arg in exc.args):
+        return "read_timeout", "Timed out waiting for response data"
+    if isinstance(exc, exceptions.ChunkedEncodingError):
+        return "incomplete_response", "Response body was interrupted"
+    if isinstance(exc, exceptions.ConnectionError):
+        return "connection_error", "Connection interrupted"
+    return "request_error", "Request interrupted"
+
+
 def submit_gemini_locked(args):
     """One synchronous generateContent call; never retried automatically."""
+    from requests.exceptions import RequestException
+
     if getattr(args, "quality", None):
         raise UserError("--quality applies to gpt-image models; nanobanana uses --image-size 1K|2K|4K")
     if getattr(args, "upload_provider", "tmpfiles") == "s3":
@@ -714,14 +783,14 @@ def submit_gemini_locked(args):
         raise FileExistsError(str(path))
     selected = session_path(getattr(args, "session_file", None))
     parent = parent_state(args, selected)
+    keep_format = getattr(args, "keep_reference_format", False)
     refs = []
     for image in args.image:
-        refs.append((image.read_bytes(), inspect_image(image)[0][0]))
+        refs.append(local_gemini_reference(image, keep_format))
     for url in args.image_url:
         refs.append(fetch_reference(url, args.direct))
     if parent:
-        image = parent_local_image(parent)
-        refs.append((image.read_bytes(), inspect_image(image)[0][0]))
+        refs.append(local_gemini_reference(parent_local_image(parent), keep_format))
     image_config = {}
     if ratio:
         image_config["aspectRatio"] = ratio
@@ -746,29 +815,42 @@ def submit_gemini_locked(args):
     if image_config:
         config["imageConfig"] = image_config
     payload = {"contents": [{"role": "user", "parts": parts}], "generationConfig": config}
-    state["phase"] = "submission_outcome_unknown"
+    state.update(phase="submission_outcome_unknown", submission_started_at=datetime.now(timezone.utc).isoformat())
     save(path, state)
-    with session(args.direct) as s:
-        r = s.post(GEMINI_API + args.model + ":generateContent", json=payload,
-                   headers={"Authorization": "Bearer " + key},
-                   timeout=(15, 300), allow_redirects=False)
-        code = r.status_code
-        try:
-            data = r.json()
-        except ValueError:
-            data = None
-    if not 200 <= code < 300:
+    started = monotonic()
+    stage = "waiting_for_headers"
+    code = None
+    try:
+        with session(args.direct) as s:
+            # Keep the request synchronous but read headers separately from the image body.
+            with closing(s.post(GEMINI_API + args.model + ":generateContent", json=payload,
+                                headers={"Authorization": "Bearer " + key},
+                                timeout=(15, 300), allow_redirects=False, stream=True)) as r:
+                code = r.status_code
+                stage = "reading_body"
+                # A 408/5xx or unexpected HTTP status does not prove generation was rejected.
+                # Do not consume or retain the body of these responses.
+                if not (200 <= code < 300 or refused(code)):
+                    raise gemini_unknown(path, state, started, "http_response", "unexpected_http_status",
+                                         f"HTTP {code} from generation endpoint", code)
+                try:
+                    data = r.json()
+                except ValueError:
+                    data = None
+    except RequestException as exc:
+        reason, message = gemini_transport_failure(exc)
+        raise gemini_unknown(path, state, started, stage, reason, message, code) from None
+    if refused(code):
         if data is None:
-            if refused(code):
-                state.update(phase="failed", error=f"HTTP {code}: gateway_rejected")
-                save(path, state)
-                raise UserError(gateway_message(code))
-            raise UserError(f"HTTP {code}: non-JSON response; outcome unknown, check provider usage records before resubmitting")
+            state.update(phase="failed", error=f"HTTP {code}: gateway_rejected")
+            save(path, state)
+            raise UserError(gateway_message(code))
         state.update(phase="failed", error=f"HTTP {code}: {safe_code(data)}")
         save(path, state)
         raise UserError(state["error"] + gemini_hint(code) + ". No request resubmitted.")
     if not isinstance(data, dict):
-        raise UserError("Unexpected response shape; outcome unknown, check provider usage records")
+        raise gemini_unknown(path, state, started, "reading_body", "invalid_response",
+                             "Invalid response from generation endpoint", code)
     finish_gemini(path, state, data)
 
 
@@ -778,7 +860,6 @@ def finish_gemini(path, state, data):
     parts = (first.get("content") or {}).get("parts") or []
     blobs = [p.get("inlineData") or p.get("inline_data") for p in parts if isinstance(p, dict)]
     blobs = [b for b in blobs if isinstance(b, dict) and isinstance(b.get("data"), str)]
-    texts = [p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str)]
     finish = safe_code({"code": first.get("finishReason")})
     usage = {k: v for k, v in (data.get("usageMetadata") or {}).items()
              if k in ("promptTokenCount", "candidatesTokenCount", "totalTokenCount") and isinstance(v, int)}
@@ -789,7 +870,7 @@ def finish_gemini(path, state, data):
         state.update(phase="failed", error="no_image", finish_reason=finish, block_reason=block)
         save(path, state)
         emit(status="failed", finish_reason=finish, block_reason=block,
-             model_text=" ".join(texts)[:500], state_file=str(path.resolve()),
+             state_file=str(path.resolve()),
              message="The provider answered without an image (it may still be billed). No request resubmitted.")
         return
     try:
@@ -1092,6 +1173,8 @@ def main_with_args(argv=None):
     s.add_argument("--image-size", choices=IMAGE_SIZES, help="nanobanana only")
     s.add_argument("--image", type=Path, action="append", default=[])
     s.add_argument("--image-url", action="append", default=[])
+    s.add_argument("--keep-reference-format", action="store_true",
+                   help="Send local nanobanana references unchanged; disable PNG-to-JPEG optimization")
     s.add_argument("--upload-provider", choices=["s3", "tmpfiles"], default="tmpfiles",
                    help="Local reference upload service (default: tmpfiles, expires after 1 hour)")
     previous = s.add_mutually_exclusive_group()
@@ -1115,6 +1198,9 @@ def main_with_args(argv=None):
         else:
             globals()[args.command](args)
         return 0
+    except GeminiOutcomeUnknown as exc:
+        emit(error=str(exc), diagnostic=exc.diagnostic, state_file=exc.state_file)
+        return 1
     except UserError as exc:
         # Controlled messages contain no provider response bodies or secrets.
         emit(error=str(exc))

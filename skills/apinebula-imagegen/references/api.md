@@ -33,9 +33,10 @@
 
 - `POST https://img-api.apinebula.ai/v1beta/models/{model}:generateContent`，请求头 `Authorization: Bearer <nanobanana key>`。
 - 正文：`contents[0].parts` 放 `{"text": 提示词}`，改图时在同一个 `parts` 里追加 `{"inlineData": {"mimeType": "image/png", "data": "<不带 data: 前缀的 base64>"}}`。
+- `mimeType` 与发送的实际字节一致。对本地参考图（含父任务输出），脚本仅在合格的静态、不透明 PNG 转为同尺寸 JPEG 后更小时才使用 `image/jpeg`。`--keep-reference-format` 关闭这个优化；远程参考图和响应图片均不转码。
 - `generationConfig.responseModalities`：只要图片时 `["IMAGE"]`。`generationConfig.imageConfig.aspectRatio`：1:1、1:4、1:8、2:3、3:2、3:4、4:1、4:3、4:5、5:4、8:1、9:16、16:9、21:9。`imageSize`：1K、2K、4K（具体模型支持哪些以接口为准）。
 - 响应：图片在 `candidates[0].content.parts[].inlineData`（`mimeType` + base64 `data`），`finishReason`、`usageMetadata` 同级。没有任务编号，也没有下载链接。
-- 2K/4K 响应体较大，客户端读超时设 300 秒。脚本不记录完整响应正文。
+- 2K/4K 响应体较大，客户端读超时设 300 秒；代理或服务端可能先结束连接。读取时区分未收到响应头与响应体中断。408/5xx（包括 JSON 错误）都保留为结果未知，不重试。日志和状态仅保留脱敏的错误类别、阶段、耗时和已知 HTTP 状态，不记录响应正文。
 - 实测（2026-10-29，本脚本）：`gemini-3.1-flash-image` 16:9 2K 文生图约 28 秒，返回 2752×1536 JPEG；1:1 1K 文生图返回 1024×1024 JPEG；用上一张作为 inlineData 参考图的改图成功，构图保持。
 - 未验证：`gemini-3-pro-image-preview` 与 4K 输出、多张参考图、安全拦截时的实际响应形态（脚本按 `finishReason`/`promptFeedback.blockReason` 处理）、失败请求是否计费。
 
